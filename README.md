@@ -13,4 +13,9 @@ ADD!!
 
 ## Installation
 
-ADD!!
+Clone the repo, then set up a virtual environment and install dependencies:
+
+```bash
+git clone <repo-url>
+cd <repo-directory>
+```
