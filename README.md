@@ -8,11 +8,11 @@ For voice isolation, we plan to use MetalVoice to filter out background noise an
 
 # Getting Started
 
-ADD THIS!!
+Reference individual READMEs linked below
 
 ## Pre-reqs
 
-ADD!!
+Reference individual READMEs linked below, for each, these are each pre-reqs
 
 ## Installation
 
