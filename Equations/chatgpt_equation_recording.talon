@@ -1,4 +1,4 @@
-# C:\Users\kaemy\AppData\Roaming\talon\user\qwen_equation_recording.talon
+# C:\Users\kaemy\AppData\Roaming\talon\user\custom_math\chatgpt_equation_recording.talon
 mode: user.math_recording
 -
 settings():

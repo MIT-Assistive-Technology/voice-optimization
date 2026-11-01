@@ -1,8 +1,12 @@
-# C:\Users\kaemy\AppData\Roaming\talon\user\qwen_equation.py
+# C:\Users\kaemy\AppData\Roaming\talon\user\custom_math\chatgpt_equation.py
+import gzip
 import json
+import os
+from pathlib import Path
 import re
 import urllib.request
 import urllib.error
+import zlib
 from talon import Context, Module, actions, clip, cron, imgui
 
 try:
@@ -52,8 +56,10 @@ ctx.lists["user.math_vocab"] = {
     "left side": "left side", "right side": "right side", "term": "term",
 }
 
-OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = "qwen3"
+GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions"
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+MODEL_NAME = "gpt-4o-mini"
+TOKEN_FILE = Path(__file__).parent / "github_token.txt"
 
 # Recording buffer state
 _math_buffer = []
@@ -71,7 +77,7 @@ _hud_job = None
 
 @imgui.open(y=0)
 def math_hud(gui: imgui.GUI):
-    gui.text(f"Qwen3 Math: {_hud_status}")
+    gui.text(f"ChatGPT Math: {_hud_status}")
     if _hud_heard:
         gui.text(f"Heard: {_hud_heard}")
     if _hud_result:
@@ -90,7 +96,6 @@ def show_hud(status: str, heard: str = "", result: str = "", auto_hide_sec: int 
         _hud_job = cron.after(f"{auto_hide_sec}s", math_hud.hide)
 
 LATEX_SYSTEM_PROMPT = (
-    "/no_think\n"
     "You are an expert speech-to-LaTeX translator. The input comes from a speech-to-text "
     "engine that frequently mishears math homophones (e.g. 'ex' for 'x', 'why' for 'y', "
     "'to' or 'too' for '2', 'for' for '4', 'pie' for 'pi', 'sign' for 'sin', 'the ex' for 'dx', "
@@ -99,6 +104,9 @@ LATEX_SYSTEM_PROMPT = (
     "1. Infer the intended mathematical equation from the phonetic transcript and output ONLY valid LaTeX code.\n"
     "2. Do NOT wrap in markdown code blocks, backticks, or dollar signs ($).\n"
     "3. Do NOT include any explanations.\n"
+    "4. Attempt to infer the equation even if it isn't entirely accurate and then output the best guess.\n"
+    "5. If the input is ambiguous, provide the most likely interpretation based on common mathematical conventions.\n"
+    "6. This is a student writing these equations from Harvard so they will be difficult most of the time.\n"
     "Examples:\n"
     "User: ex squared plus why squared equals are squared\n"
     "Assistant: x^2 + y^2 = r^2\n"
@@ -107,7 +115,6 @@ LATEX_SYSTEM_PROMPT = (
 )
 
 EDIT_LATEX_SYSTEM_PROMPT = (
-    "/no_think\n"
     "You are an expert LaTeX equation editor. You will receive a CURRENT_EQUATION (in LaTeX "
     "or Unicode math) and a spoken EDIT_INSTRUCTION from a voice dictation user.\n"
     "Note that spoken instructions may contain speech-to-text homophones ('ex' for 'x', "
@@ -136,47 +143,176 @@ def math_phrase(m) -> str:
             words.extend(item)
     return " ".join(words)
 
-def call_qwen3(system_prompt: str, user_text: str) -> str:
-    """Calls local qwen3:4b via Ollama with thinking disabled for instant response."""
+_cached_groq_model = None
+
+def get_groq_model(token: str) -> str:
+    """Finds the best active model available on the user's Groq account."""
+    global _cached_groq_model
+    if _cached_groq_model:
+        return _cached_groq_model
+
+    preferences = [
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
+        "llama3-8b-8192",
+        "llama3-70b-8192",
+        "mixtral-8x7b-32768",
+        "qwen/qwen3.8-27b",
+    ]
+
+    try:
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/models",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "TalonVoice-Math/1.0"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            model_ids = {m["id"] for m in data.get("data", [])}
+            print(f"[Groq Available Models] {model_ids}")
+
+            for p in preferences:
+                if p in model_ids:
+                    _cached_groq_model = p
+                    return _cached_groq_model
+
+            for m_id in model_ids:
+                if "whisper" not in m_id and "guard" not in m_id:
+                    _cached_groq_model = m_id
+                    return _cached_groq_model
+    except Exception as e:
+        print(f"[Groq Model Auto-Detect] {e}")
+
+    _cached_groq_model = "llama-3.1-8b-instant"
+    return _cached_groq_model
+
+def get_auth_and_config():
+    """Detects token, API endpoint, model, and provider name."""
+    token_files = [
+        Path(__file__).parent / "api_token.txt",
+        Path(__file__).parent / "openai_key.txt",
+        Path(__file__).parent / "groq_token.txt",
+        Path(__file__).parent / "github_token.txt",
+    ]
+
+    token = None
+    for tf in token_files:
+        if tf.exists():
+            try:
+                content = tf.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+
+            # Look for standard API key prefixes
+            m = re.search(r'(sk-[a-zA-Z0-9_\-\.]+)|(gsk_[a-zA-Z0-9_\-\.]+)|(AIza[a-zA-Z0-9_\-\.]+)', content)
+            if m:
+                token = m.group(0).strip().strip("'\"")
+                break
+
+            # Fallback: first non-comment line
+            lines = [l.strip().strip("'\"") for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
+            if lines and not (lines[0].startswith("ghp_") or lines[0].startswith("github_pat_")):
+                token = lines[0]
+                break
+
+    if not token:
+        token = (
+            os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("GROQ_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+        )
+
+    if not token:
+        return None, None, None, None
+
+    # Detect provider by token prefix
+    if token.startswith("gsk_"):
+        model = get_groq_model(token)
+        return token, "https://api.groq.com/openai/v1/chat/completions", model, f"Groq ({model})"
+    elif token.startswith("sk-"):
+        return token, "https://api.openai.com/v1/chat/completions", "gpt-4o-mini", "OpenAI"
+    elif token.startswith("AIza"):
+        return token, "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", "gemini-2.0-flash", "Gemini"
+    elif token.startswith("ghp_") or token.startswith("github_pat_"):
+        # GitHub Models was sunset/retired in 2026
+        return None, None, None, None
+    else:
+        model = get_groq_model(token)
+        return token, "https://api.groq.com/openai/v1/chat/completions", model, f"Groq ({model})"
+
+def call_chatgpt(system_prompt: str, user_text: str) -> str:
+    """Calls the configured LLM (Groq, OpenAI, or Gemini) using standard OpenAI Chat Completions API."""
+    token, endpoint, model_name, provider = get_auth_and_config()
+    if not token:
+        raise ValueError(
+            f"API key not found! Please paste your key into:\n{Path(__file__).parent / 'api_token.txt'}"
+        )
+
     body = {
-        "model": MODEL_NAME,
+        "model": model_name,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text}
         ],
-        "stream": False,
-        "think": False,
-        "keep_alive": "24h",
-        "options": {
-            "temperature": 0.0,
-            "num_ctx": 2048
-        }
+        "temperature": 0.0
     }
 
     req = urllib.request.Request(
-        OLLAMA_CHAT_URL,
+        endpoint,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "TalonVoice-Math/1.0"
+        },
         method="POST"
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError:
-        # Fallback if the user's Ollama version doesn't accept top-level "think" key
-        body.pop("think", None)
-        req = urllib.request.Request(
-            OLLAMA_CHAT_URL,
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=12) as response:
+            raw_bytes = response.read()
+            # Decompress if server sent gzip or deflate
+            if raw_bytes.startswith(b"\x1f\x8b") or "gzip" in response.headers.get("Content-Encoding", "").lower():
+                raw_bytes = gzip.decompress(raw_bytes)
+            elif "deflate" in response.headers.get("Content-Encoding", "").lower():
+                raw_bytes = zlib.decompress(raw_bytes)
 
-    content = data.get("message", {}).get("content", "").strip()
-    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            raw_text = raw_bytes.decode("utf-8", errors="replace")
+            if not raw_text.strip():
+                raise RuntimeError(f"Server returned empty response (HTTP {response.status})")
+
+            try:
+                data = json.loads(raw_text)
+            except json.JSONDecodeError as jde:
+                raise RuntimeError(f"Server returned non-JSON response: {raw_text[:200]}") from jde
+    except urllib.error.HTTPError as e:
+        error_msg = f"HTTP {e.code}: {e.reason}"
+        try:
+            err_bytes = e.read()
+            if err_bytes.startswith(b"\x1f\x8b") or "gzip" in e.headers.get("Content-Encoding", "").lower():
+                err_bytes = gzip.decompress(err_bytes)
+            elif "deflate" in e.headers.get("Content-Encoding", "").lower():
+                err_bytes = zlib.decompress(err_bytes)
+            err_text = err_bytes.decode("utf-8", errors="replace")
+            err_data = json.loads(err_text)
+            if "message" in err_data:
+                error_msg = f"API Error: {err_data['message']}"
+            elif "error" in err_data:
+                if isinstance(err_data["error"], dict) and "message" in err_data["error"]:
+                    error_msg = f"API Error: {err_data['error']['message']}"
+                else:
+                    error_msg = f"API Error: {err_data['error']}"
+        except Exception:
+            pass
+        raise RuntimeError(error_msg) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Network error: {e.reason}") from e
+
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
     content = re.sub(r"^```(?:latex)?\n?|\n?```$", "", content).strip()
     return content.strip("$").strip()
 
@@ -217,19 +353,19 @@ def _paste_and_record(latex_eq: str, output_mode: str, heard_label: str):
 
 @mod.action_class
 class Actions:
-    def qwen_make_equation(spoken_text: str, output_mode: str = "normal"):
-        """Translates spoken math to LaTeX via Qwen3, then converts to target form."""
+    def chatgpt_make_equation(spoken_text: str, output_mode: str = "normal"):
+        """Translates spoken math to LaTeX via ChatGPT (GPT-4o-mini), then converts to target form."""
         global _equation_history
         try:
             _equation_history = []
-            show_hud("Translating via Qwen3...", heard=spoken_text, auto_hide_sec=10)
-            latex_eq = call_qwen3(LATEX_SYSTEM_PROMPT, spoken_text)
+            show_hud("Translating math...", heard=spoken_text, auto_hide_sec=10)
+            latex_eq = call_chatgpt(LATEX_SYSTEM_PROMPT, spoken_text)
             _paste_and_record(latex_eq, output_mode, spoken_text)
         except Exception as e:
-            print(f"[Qwen3 Math Error] {e}")
-            show_hud(f"Error: {e}", heard=spoken_text, auto_hide_sec=8)
+            print(f"[ChatGPT Math Error] {e}")
+            show_hud(f"Error: {e}", heard=spoken_text, auto_hide_sec=10)
 
-    def qwen_edit_last_equation(edit_instruction: str):
+    def chatgpt_edit_last_equation(edit_instruction: str):
         """Edits the last generated equation in-place based on spoken instructions."""
         global _equation_history
         if not _equation_history:
@@ -244,20 +380,20 @@ class Actions:
         try:
             show_hud(f"Editing: {prev_rendered}", heard=edit_instruction, auto_hide_sec=10)
             user_prompt = f"CURRENT_EQUATION: {prev_latex}\nEDIT_INSTRUCTION: {edit_instruction}"
-            new_latex = call_qwen3(EDIT_LATEX_SYSTEM_PROMPT, user_prompt)
+            new_latex = call_chatgpt(EDIT_LATEX_SYSTEM_PROMPT, user_prompt)
 
             _delete_previous_equation_in_document(len(prev_rendered))
             _paste_and_record(new_latex, mode, f"Edit: {edit_instruction}")
         except Exception as e:
-            print(f"[Qwen3 Edit Error] {e}")
-            show_hud(f"Edit Error: {e}", heard=edit_instruction, auto_hide_sec=8)
+            print(f"[ChatGPT Edit Error] {e}")
+            show_hud(f"Edit Error: {e}", heard=edit_instruction, auto_hide_sec=10)
 
-    def qwen_append_last_equation(extra_math: str):
+    def chatgpt_append_last_equation(extra_math: str):
         """Appends additional spoken math to the end of the last equation in-place."""
-        actions.user.qwen_edit_last_equation(f"append the following to the end of the equation: {extra_math}")
+        actions.user.chatgpt_edit_last_equation(f"append the following to the end of the equation: {extra_math}")
 
-    def qwen_edit_selected_equation(edit_instruction: str, output_mode: str = "normal"):
-        """Copies whatever equation is highlighted on screen, edits it via Qwen3, and replaces it."""
+    def chatgpt_edit_selected_equation(edit_instruction: str, output_mode: str = "normal"):
+        """Copies whatever equation is highlighted on screen, edits it via ChatGPT, and replaces it."""
         global _equation_history
         try:
             clip.set_text("")
@@ -271,14 +407,14 @@ class Actions:
 
             show_hud(f"Editing selected: {selected_text}", heard=edit_instruction, auto_hide_sec=10)
             user_prompt = f"CURRENT_EQUATION: {selected_text}\nEDIT_INSTRUCTION: {edit_instruction}"
-            new_latex = call_qwen3(EDIT_LATEX_SYSTEM_PROMPT, user_prompt)
+            new_latex = call_chatgpt(EDIT_LATEX_SYSTEM_PROMPT, user_prompt)
 
             _equation_history = []
             _paste_and_record(new_latex, output_mode, f"Selected Edit: {edit_instruction}")
         except Exception as e:
-            show_hud(f"Selected Edit Error: {e}", auto_hide_sec=6)
+            show_hud(f"Selected Edit Error: {e}", auto_hide_sec=8)
 
-    def qwen_revert_equation():
+    def chatgpt_revert_equation():
         """Reverts the last equation edit and restores the previous version in place."""
         global _equation_history
         if len(_equation_history) < 2:
@@ -320,13 +456,13 @@ class Actions:
             show_hud("Buffer is already empty", heard="(waiting...)", auto_hide_sec=0)
 
     def math_recording_finish():
-        """Finishes recording, sends the combined buffer to Qwen3, and pastes the result."""
+        """Finishes recording, sends the combined buffer to ChatGPT, and pastes the result."""
         global _math_buffer, _math_output_mode
         actions.mode.disable("user.math_recording")
         full_text = " ".join(_math_buffer).strip()
         _math_buffer = []
         if full_text:
-            actions.user.qwen_make_equation(full_text, _math_output_mode)
+            actions.user.chatgpt_make_equation(full_text, _math_output_mode)
         else:
             show_hud("Cancelled (No speech recorded)", auto_hide_sec=3)
 
