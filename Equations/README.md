@@ -1,31 +1,20 @@
 # ABOUT
-This guide walks you through setting up Ollama and the custom equation editor (In its early stages).
+
+This guide walks you through setting up the custom equation editor and an API key for Groq.
 
 # INSTALLATION INSTRUCTIONS
-## Step 1: Install unicodeit in talon folder
-```bash
-~/.talon/.venv/bin/pip install unicodeit
 
-~/.talon/.venv/bin/python -m pip show unicodeit
-```
-
-## Step 2: Install Ollama and Qwen 3
-1. Go to the [Ollama Download Page](https://ollama.com/download/mac).
-2. Download the Ollama installer manually then set up the app
-3. Open up the terminal and type
-    ```
-    Ollama pull qwen3
-    ```
-4. This will install Qwen3 for Ollama
-
-## Step 3: Set up the scripts
+## Step 1: Set up the scripts
 
 1. Download the Scripts from the questions folder
 2. Make a new folder in ~/.talon/user
-   * Call the folder something like, math_equations
-3. Drag all the scripts into the folder 
+   - Call the folder something like, math_equations
+3. Drag all the scripts into the folder
 
-## Step 4: Test
-1. Make sure everything is saved
-2. Have Talon up and running
-3. Say "Start Equation" and a window should appear. 
+## Step 2: Setup Groq
+
+1. Go to https://groq.com/
+2. Create an account
+3. Within Groq go to API Keys
+4. Make an API key and name it something like "Talon"
+5. Copy that key into the api_token.txt file and save
